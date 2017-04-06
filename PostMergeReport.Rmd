@@ -1,0 +1,68 @@
+---
+title: "Post Merge Report"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(healthcareai)
+library(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+
+connectionString <- '
+  driver={SQL Server};
+  server=qu-edwdev;
+  database=SAM;
+  trustedConnection=true'
+query <- '
+SELECT [PatientSource]
+      ,[UniquePatientCNT]
+  FROM [SAM].[MasterDataMonitoring].[PatientIDReconV5]'
+Recon <- selectData(connectionString,query)
+```
+## Incoming records
+The multivue process is expected to output few EDWPatientIDs than it recieves and all EDWPatientIDs should arrive in MasterPatient.Patient. 
+```{r tablercon, echo= FALSE}
+Recon
+```
+##Suspicious Records
+EDWPatientIDs may group together different numbers of patient identities.  If a patient is only represesnted once then they will have their own EDWPatientID.  If too many are merged together it may be a sign that something unusual has happened.
+```{r HighFrequency, echo= FALSE}
+query <- 'SELECT 
+      [EDWPatientIdCNT]
+      ,[FrequncyCNT]
+  FROM [SAM].[MasterDataMonitoring].[EdwPatientIDHighFrequncyV5]'
+freq <- selectData(connectionString,query) 
+plot(freq, type = 'h', lwd = 10, main = 'Merge Count', lend = 'square' , log= 'y')
+```
+
+THe most suspicious of these are:
+
+```{r suspiciousmerge, echo= FALSE}
+
+query <- 'SELECT top 5
+      [EDWPatientID]
+      ,[EDWPatientIdCNT]
+  FROM [SAM].[MasterDataMonitoring].[EDWPatientIDFrequencyV5]
+  order by EDWPatientIDCNT desc'
+
+suspect <- selectData(connectionString,query) 
+head(suspect, 20)
+```
+
+## Load History
+The number of records loaded can be helpful for troubleshooting.
+
+```{r loadhistory, echo= FALSE}
+query <- 'SELECT  
+--[EntityType]
+      --,
+[DateCreated]
+      ,[SourcePatientCNT]
+      ,[VirtualPatientCNT]
+      ,[MergedPatientCNT]
+  FROM [SAM].[MasterDataMonitoring].[MultiVueCountHistoryV5]'
+
+history <- selectData(connectionString,query) 
+history
+```

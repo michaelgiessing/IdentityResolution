@@ -1,0 +1,78 @@
+---
+title: "Post Match Report"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(healthcareai)
+library(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+
+connectionString <- '
+  driver={SQL Server};
+  server=qu-edwdev;
+  database=SAM;
+  trustedConnection=true'
+query <- '/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT 
+      [Score]
+      ,[ScoreCNT]
+  FROM [SAM].[MasterDataMonitoring].[PostMatchScoreFrequency]'
+ScoreFreq <- selectData(connectionString,query)
+```
+
+## Score Distribution
+
+
+
+After the MultiVue match process is run a data sync was run to retrieve data from MultiVue.  This data is a score for each pair of records that broke the matching threshold. The distribution of score shows which scores contain the most matches.
+
+
+```{r Distribution, echo=FALSE }
+plot(ScoreFreq, type = 'h', lwd = 1, main = 'Score Distribution', lend = 'square' )
+```
+
+ 
+
+```{r top scores, echo=FALSE}
+tot <- sum(ScoreFreq$ScoreCNT)
+top5 <- ScoreFreq %>%
+  arrange(desc(ScoreCNT)) %>%
+  head(n=5) %>%
+  arrange(desc(Score))
+```
+From this distribution the prominent peaks are if the most interest in finding the merge threshold. Preform a validation test on these peaks to find which neighborhood the merge threshold should be in.The peaks account for `r sprintf("%3.1f",100*sum(top5$ScoreCNT)/tot)`% of the possible matches.
+
+
+```{r top scores table, echo=FALSE}
+top5
+
+```
+
+Those scoring groups have the following score breakdowns:
+
+```{r scoredetails }
+query <- 'SELECT  distinct
+      m.[Score]
+      --,[ScoreDetailsID]
+      --,[MatchRuleName]
+     -- ,[Hash]
+     -- ,[ScoreDetailGroupID]
+      ,[GroupName]
+      ,[GroupScore]
+     -- ,[ThresholdApplied]
+      --,[ScoreBeforeLimitApplied]
+      --,[ScoreDetailGroupFieldID]
+      ,[FieldIdentifier]
+      ,[MatchType]
+      ,[FieldScore]
+    --  ,[ScoreReduction]
+  FROM [SAM].[MasterDataMonitoring].[PostMatchScoreDetail] m
+  where m.Score in (SELECT top 5
+      [Score]
+  FROM [SAM].[MasterDataMonitoring].[PostMatchScoreFrequency] 
+  order by ScoreCNT desc)'
+scoredetails <- selectData(connectionString,query)
+scoredetails
+```
