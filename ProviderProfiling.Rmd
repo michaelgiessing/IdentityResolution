@@ -1,0 +1,325 @@
+---
+title: "Shared Person Provider Profiling"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(healthcareai)
+library(dplyr)
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+DisplayPHI <- TRUE
+
+
+connectionString <- "
+  driver={SQL Server};
+  server=AGCA-edwdev;
+  database=SAM;
+  trustedConnection=true"
+```
+
+```{r, dependencies, echo = FALSE}
+query <- "SELECT DatabaseNM + '.' + SchemaNM + '.' + ViewNM
+FROM EDWAdmin.CatalystAdmin.TableBASE
+WHERE tableID IN
+(
+    SELECT [SourceEntityID]
+    FROM [EDWAdmin].[CatalystAdmin].[BindingDependencyBASE]
+    WHERE bindingID =
+    (
+        SELECT [BindingID]
+        FROM EDWAdmin.CatalystAdmin.BindingBASE
+        WHERE DestinationEntityID =
+        (
+            SELECT tableID
+            FROM EDWAdmin.CatalystAdmin.TableBASE
+            WHERE schemaNM = 'Person'
+                  AND ViewNM = 'SourceProvider'
+        )
+    )
+);"
+
+DependencyList <- selectData(connectionString,query)
+
+```
+
+##Table Dependencies
+The dependencies for SourceProvider are **`r as.character(DependencyList[,1])`**
+
+
+
+
+
+
+```{r, fillrate , echo= FALSE}
+query <- "
+SELECT TOP 10
+      [AttributeNM]
+      ,[RowSourceDSC]
+      ,[RowCNT]
+      ,[ValueCNT]
+      ,[DistinctValueCNT]
+      ,[NullCNT]
+      ,BlankCNT
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource]
+  order by 100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) "
+FillRate <- selectData(connectionString,query)
+
+ query <- "select count(*)
+from shared.Person.SourceProvider"
+count <-  selectData(connectionString,query)
+ count <- count[1,1]
+
+query <-"SELECT   
+      [RowSourceDSC]
+      ,100-100*(sum([NullCNT]) +sum(BlankCNT))/cast(sum([RowCNT]) as float) as FillPCT
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource]
+group by rowsourceDSC"
+FillRateBySource <- selectData(connectionString,query)
+
+query <- " select  columnNM as AttributeNM
+  from EDWAdmin.CatalystAdmin.TableBASe T
+  inner join   EDWAdmin.CatalystAdmin.ColumnBASE C
+  on T.tableID = C.tableID
+  where databaseNM = 'shared'
+  and schemanm = 'Person'
+  and tableNM = 'SourceProviderBASE'
+  and ColumnNM not in ('BindingID','BindingNM', 'LastLoadDTS','ProviderID','RowSourceDSC')
+
+  Except
+
+  SELECT distinct
+      [AttributeNM]
+
+  
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource]"
+
+UnUsedList <- FillRateBySource <- selectData(connectionString,query,)
+
+```
+
+## Fill Rates
+For a field to be useful it must contain data. The fields **`r as.character(UnUsedList[,1])`** contain only NULLS and are not represented in this analysis.  The lowest 10 fill rates in Shared.Person.SourceProvider are in the table below. Additional information can be found in the EDW at SAM.SourceProviderProfiling.SummaryProviderDescriptiveStatisticsBySource
+
+```{r tableFillRate, echo= FALSE}
+FillRate <- FillRate %>% 
+ mutate(RowCNT = count, NullCNT = count - ValueCNT) %>%
+ mutate( FillPCT = 100-100*(NullCNT + BlankCNT)/RowCNT) %>%
+select(AttributeNM, RowSourceDSC, RowCNT, ValueCNT, DistinctValueCNT, NullCNT,BlankCNT, FillPCT)
+kable(FillRate, digits =1)
+```
+
+
+## Supicious Data Type 
+
+```{r datatype, include=FALSE}
+query <-"SELECT  [AttributeNM],
+                [RowSourceDSC],
+                [RowCNT],
+                [NumericValueCNT],
+                [DateValueCNT],
+                [TextValueCNT]
+
+
+
+FROM [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource] summ
+
+WHERE(numericValueCNT <> 0
+      AND DateValueCNT <> 0)
+     OR (DateValueCNT <> 0
+         AND textvalueCNT <> 0)
+     OR (numericValueCNT <> 0
+         AND textvalueCNT <> 0)
+order by RowSourceDSC, AttributeNM;"
+
+```
+
+Text field can hold almost any type of data. In some cases, the text could be all numeric or it may contain dates. The table below shows fields where the data could be cast as more than one type. (Note: Blank fields can be cast as datatime and often appear in this table.)
+
+```{r DataTYpe, echo= FALSE}
+datatype <- selectData(connectionString,query)
+datatype <- datatype %>%
+  mutate( NumericValuePCT = 100*NumericValueCNT/RowCNT, DateValuePCT = 100*DateValueCNT/RowCNT, TextValuePCT = 100*TextValueCNT/RowCNT) %>%
+  select(AttributeNM,RowSourceDSC,NumericValuePCT,  DateValuePCT, TextValuePCT)
+  
+kable(datatype, digits = 2)
+```
+
+
+```{r daterange, include=FALSE}
+query <- "
+  SELECT TOP 20
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM not in ('PatientStateCD', 'GenderCD', 'PatientCityNM', 'MaritalStatusDSC', 'LanguageDSC', 'EthnicGroupDSC', 'ContactsInLas3YearsNBR','RaceDSC')
+  order by CNT DESC
+"
+
+```
+
+
+## Suspicious Values
+
+```{r susp, include=FALSE}
+query <- "
+  SELECT TOP 20
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+
+  order by CNT DESC
+"
+
+```
+
+Suspicious values occur frequently in the data.  They are often default values or some method of recording nulls that do not represent real information. . The table below has the top 20 most frequent values in Shared.Person.SourceProvider.
+
+```{r SUspTable, echo= FALSE}
+Susp20 <- selectData(connectionString,query)
+kable(Susp20, digits = 3)
+```
+
+
+
+
+
+
+### Primary Specialty
+The table below has the top 10 most frequent specialities.
+```{r dates,  echo= FALSE }
+query <- "
+ SELECT TOP 10
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM in ('PrimarySpecialtyCD', 'PrimarySpecialtyNM')
+  order by CNT DESC
+"
+date <- selectData(connectionString,query)
+kable(date, digits = 3)
+
+```
+
+
+
+
+
+
+
+
+
+### First Name
+First name may contain default values or variants of names for when a name is unknown. The table below are the top 10 most frequent provider first names.   
+```{r firstname,  echo= FALSE }
+query <- "
+ SELECT TOP 10
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM in ('ProviderFirstNM')
+  order by CNT DESC
+"
+firstname <- selectData(connectionString,query)
+kable(firstname, digits = 3)
+
+```
+
+
+### Middle name
+Middle name may contain default values or variants of names for when a name is unknown. The table below are the top 10 most frequent provider middle names.   
+```{r middlename,  echo= FALSE }
+query <- "
+ SELECT TOP 10
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM in ('ProviderMiddleNM')
+  order by CNT DESC
+"
+middlename <- selectData(connectionString,query)
+kable(middlename, digits = 2 )
+
+```
+
+
+###Last Name
+Last name may contain default values or variants of names for when a name is unknown. The table below are the top 10 most frequent provider last names.   
+```{r lastname,  echo= FALSE }
+query <- "
+ SELECT TOP 10
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM in ('ProviderLastNM')
+  order by CNT DESC
+"
+lastname <- selectData(connectionString,query)
+kable(lastname, digits = 2 )
+
+```
+
+###Name Suffix
+Name may contain default values or variants of names for when a name is unknown.   
+```{r PCP,  echo= FALSE }
+query <- "
+ SELECT TOP 10
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM in ('ProviderSuffixNM')
+  order by CNT DESC
+"
+PCP <- selectData(connectionString,query)
+kable(PCP, digits = 3)
+```
+
+###NPI
+NPI may contain default values.   
+```{r MRN,  echo= FALSE }
+if (DisplayPHI) {query <- "
+ SELECT TOP 10
+      [rowsourceDSC]
+      ,[attributeNM]
+      ,[valueTXT]
+      ,[CNT]
+      ,[AllSourceCNT]
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderSuspiciousValues]
+  where attributeNM in ('NPI')
+  order by CNT DESC
+"
+MRN <- selectData(connectionString,query)
+kable(MRN, digits = )
+}
+
+```
+
+
+
+
+
+
+
+
