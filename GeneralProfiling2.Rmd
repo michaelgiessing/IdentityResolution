@@ -1,0 +1,154 @@
+---
+title: "Shared Person Patient Profiling"
+output: html_document
+---
+  
+  
+```{r setup, include=FALSE}
+library(healthcareai)
+library(dplyr)
+library(knitr)
+library(tidyr)
+knitr::opts_chunk$set(echo = TRUE)
+
+#Configure to display PHI
+DisplayPHI <- TRUE
+
+# Configure table to be profiled
+ViewNM <- 'sourcePatient'
+SchemaNM <- 'Person'
+DatabaseNM <- 'Shared'
+#pk <- c("RowSourceDSC","PatientID")
+
+
+# Configure connection string for client
+connectionString <- "
+driver={SQL Server};
+server=AGCA-edwdev;
+database=SAM;
+trustedConnection=true"
+
+#Column List
+query <- paste("Select ColumnNM 
+                FROM  EDWAdmin.CatalystAdmin.TableBASE T
+                inner join EDWAdmin.CatalystAdmin.ColumnBASE C
+                on t.tableId = C.tableID
+                WHERE schemaNM = '" ,SchemaNM , "'
+                AND ViewNM = '", ViewNM ,"' and PrimaryKeyFLG ='N'
+               and DataTypeDSC <> 'int'", sep = "")
+columnlist <- selectData(connectionString,query)
+#columnlist <- filter(columnlist, ColumnNM == "BindingID"| ColumnNM == "BindingNM"| ColumnNM == "LastLoadDTS")
+columnlist <- filter(columnlist, ColumnNM != "BindingID", ColumnNM != "BindingNM", ColumnNM != "LastLoadDTS")
+
+columnlist1 <- columnlist[,1]
+columnlist2 <-paste("cast( ",columnlist[,1],  "AS varchar(2000))")
+
+
+#PK Column List
+query <- paste("Select ColumnNM 
+                FROM  EDWAdmin.CatalystAdmin.TableBASE T
+                inner join EDWAdmin.CatalystAdmin.ColumnBASE C
+                on t.tableId = C.tableID
+                WHERE schemaNM = '" ,SchemaNM , "'
+                AND ViewNM = '", ViewNM ,"' and PrimaryKeyFLG ='Y'", sep = "")
+pk <- selectData(connectionString,query)
+
+
+
+numerictry <- paste("Try_convert(Numeric, ", columnlist2, ") as ", columnlist[,1] ,"NumericTry", sep= "", collapse = ", ")
+datetry <- paste("Try_convert(date, ",columnlist2,") as ", columnlist[,1] ,"DateTry", sep= "", collapse = ", ")
+chartry <- paste("CASE WHEN ", columnlist2, " IS NOT NULL
+                                  AND TRY_CONVERT (NUMERIC, ", columnlist2, ") IS NULL
+                                  AND TRY_CONVERT (DATE,", columnlist2, ") IS NULL THEN 1 ELSE NULL END as ", columnlist[,1] ,"CharTry", sep= "", collapse = ", ")
+
+#Dependency list
+query <- paste("SELECT DatabaseNM + '.' + SchemaNM + '.' + ViewNM
+FROM EDWAdmin.CatalystAdmin.TableBASE
+WHERE tableID IN
+(
+    SELECT [SourceEntityID]
+    FROM [EDWAdmin].[CatalystAdmin].[BindingDependencyBASE]
+    WHERE bindingID in
+    (
+        SELECT [BindingID]
+        FROM EDWAdmin.CatalystAdmin.BindingBASE
+        WHERE DestinationEntityID in
+        (
+            SELECT tableID
+            FROM EDWAdmin.CatalystAdmin.TableBASE
+            WHERE schemaNM = '" ,SchemaNM , "'
+                  AND ViewNM = '", ViewNM ,"'
+        )
+    )
+);", sep ="")
+
+DependencyList <- selectData(connectionString,query)
+
+```
+
+##Table Dependencies
+The dependencies for SourcePatient are **`r as.character(DependencyList[,1])`**
+
+
+
+
+``` {r fillrates, include=FALSE}
+#count records
+query <-paste( "select count(*)
+  from " ,DatabaseNM,".",SchemaNM,".",ViewNM,"
+order by newid()",sep="")
+recordcount <-  selectData(connectionString,query)
+
+
+query <-paste( "select top 10000 * ,", datetry, ", ", chartry," , ", numerictry,"
+  from " ,DatabaseNM,".",SchemaNM,".",ViewNM,"
+  order by newid()",sep="")
+
+
+filecon <- file("query.txt")
+writeLines(query,filecon)
+close(filecon)
+
+sample1 <-  selectData(connectionString,query)
+sample1 <- tbl_df(sample1)
+
+FillRate <- sample1 %>%
+  mutate(pkey = paste(RowSourceDSC,PatientID,sep="|") ) %>%
+  select( -BindingID, -BindingNM, -LastLoadDTS, -PatientID) %>%
+  gather("AttributeNM","ValueTXT",-c(pkey,RowSourceDSC) ) %>%
+  mutate(NullFLG = is.na(ValueTXT), BlankFLG =  coalesce( nchar(trimws(ValueTXT, "both")) == 0, FALSE)) %>%
+ select(-pkey) %>%
+  group_by(RowSourceDSC, AttributeNM) %>%
+  summarize( TotalRowsCNT = recordcount[1,1], SampleSize = n(), DistinctPCT = 100* length(unique(ValueTXT))/n(),  NullPCT = 100*sum(NullFLG)/n() , BlankPCT = 100*sum(BlankFLG)/n(), FillPCT = 100-BlankPCT-NullPCT  ) %>%
+  arrange(FillPCT) %>%
+top_n(20)
+
+
+PrimaryKey <- sample1[, levels(pk[,1])]
+```
+For a field to be useful it must contain data. The lowest 20 fill rates in Shared.Person.SourcePatient are in the table below. Additional information can be found in the EDW at SAM.SourcePatientProfiling.SummaryPatientDescriptiveStatisticsBySource
+  
+``` {r fillratetable , echo= FALSE }
+ kable(FillRate, digits =1) 
+
+```
+
+
+```{r datatype, echo=FALSE}
+#Filter out columns that arent' about data types
+DataTypes0 <- sample1[,!(names(sample1) %in% columnlist1)]
+
+DataTypes <- DataTypes0 %>%
+  #mutate(pkey = paste(RowSourceDSC,PatientID,sep="|") ) %>%
+  select( -BindingID, -BindingNM, -LastLoadDTS,-PatientID) %>%
+  gather("AttributeNM","ValueTXT",-c(RowSourceDSC) ) %>%
+  mutate(ValueTXT = is.na(ValueTXT)) %>%
+  #mutate(NumericFLG = is.numeric(ValueTXT), CharFLG = is.character(ValueTXT)) %>%
+ #select(-pkey) %>%
+  group_by(RowSourceDSC, AttributeNM) %>%
+  summarise(NumericCNT = 100*sum(ValueTXT)/n())
+
+
+kable(DataTypes , digits = 2)
+
+```

@@ -1,0 +1,225 @@
+```{r titleconfig, echo=FALSE}
+domain <- "Patient"
+rule <- "Patient"
+```
+---
+title: `r paste( domain, "Post Match Report")`
+output:
+  html_document: default
+
+---
+
+```{r setup, include=FALSE}
+library(healthcareai)
+library(dplyr)
+library(knitr)
+library(tidyr)
+knitr::opts_chunk$set(echo = TRUE)
+options(knitr.kable.NA = '')
+
+
+
+
+connectionString <- '
+  driver={SQL Server};
+  server=agca-edwdev;
+  database=SAM;
+  trustedConnection=true'
+
+```
+
+
+##Verification
+```{r verification, echo=FALSE}
+query <- paste( "select count(*)
+  from MultiVueDataSync.",domain,".",rule, sep = "")
+
+totalrecords <-  selectData(connectionString,query)
+totalrecords <- totalrecords[1,1]
+
+query <- paste("select
+       Count(*) AS PatientCNT
+FROM   shared.person.source" , domain,sep = "")
+
+totalSourcerecords <-  selectData(connectionString,query)
+
+query <- paste("select rowsourcedsc as Source, count(*) as RecordCNT
+    from [MultiVueDataSync].",domain,".[EntitySources] E
+    LEFT OUTER JOIN [MultiVueDataSync].",domain,".",rule, " AS Patient1
+    ON E.VirtualId = patient1.identifier
+    group by rowsourcedsc"
+, sep = "")
+
+sourcerecords <- selectData(connectionString,query)
+
+
+
+```
+
+The number of total number of records processed is  `r  totalrecords` out of `r totalSourcerecords` in Share Person. The number of records from each source is in the table below.
+
+```{r sourcerecords, echo=FALSE}
+kable(sourcerecords)
+
+```
+
+##Match Combination Count
+
+
+```{r matchcombo, echo=FALSE}
+query <- paste(
+ "select count(*)
+  from MultiVueDataSync.",domain,".","Match", sep = "")
+
+totalmatches <-  selectData(connectionString,query)
+totalmatches <- totalmatches[1,1]
+
+
+```
+
+Matching records are a pair of records that scored high enough to be above the match threshold. These matching pairs of records are candidates to be merged. There are `r totalmatches` pairs of matching records. The matches can occur between different sources.  The breakdown of these matches between the sources is in the table below.
+
+```{r matchmatrix, echo= FALSE}
+query <- paste("SELECT e1.source as Source, e2.source as Source2,count(*)as  MatchCNT
+FROM   [MultiVueDataSync].",domain,".[Match] AS M
+       INNER JOIN
+       [MultiVueDataSync].",domain,".[EntitySources] AS E1
+       ON m.VirtualEntity1Id = e1.VirtualId
+       INNER JOIN
+       [MultiVueDataSync].",domain,".[EntitySources] AS E2
+       ON m.VirtualEntity2Id = e2.VirtualId
+       LEFT OUTER JOIN
+       [MultiVueDataSync].",domain,".",rule," AS Patient1
+       ON M.VirtualEntity1Id = patient1.identifier
+       LEFT OUTER JOIN
+       [MultiVueDataSync].",domain,".",rule," AS Patient2
+       ON M.VirtualEntity2Id = patient2.identifier
+        group by e1.source, e2.source", sep = "")
+
+matchmatrix<- selectData(connectionString,query)
+matchmatrix <- spread(matchmatrix,Source2, MatchCNT)
+kable(matchmatrix)
+```
+
+```{r scoredist , include=FALSE}
+
+query <- paste("
+  SELECT 
+      [Score]
+	 , count(score) as ScoreCNT 
+  FROM [MultiVueDataSync].",domain,".[Match] M
+  group by score", sep = "")
+ScoreFreq <- selectData(connectionString,query)
+
+
+```
+
+
+
+## Score Distribution
+
+
+
+After the MultiVue match process is run a data sync was run to retrieve data from MultiVue.  This data is a score for each pair of records that broke the matching threshold. The distribution of score shows which scores contain the most matches.
+
+
+```{r Distribution, echo=FALSE }
+plot(ScoreFreq, type = 'h', lwd = 10, main = 'Score Distribution', lend = 'square'  )
+
+```
+
+ 
+
+```{r top scores, echo=FALSE}
+tot <- sum(ScoreFreq$ScoreCNT)
+top8 <- ScoreFreq %>%
+  arrange(desc(ScoreCNT)) %>%
+  head(n=8) %>%
+  mutate(ScorePCT = 100*ScoreCNT/totalmatches ) %>%
+  arrange(desc(ScoreCNT))
+```
+From this distribution the prominent peaks are if the most interest in finding the merge threshold. Preform a validation test on these peaks to find which neighborhood the merge threshold should be in.The peaks account for `r sprintf("%3.1f",100*sum(top8$ScoreCNT)/tot)`% of the possible matches.
+
+
+```{r top scores table, echo=FALSE}
+kable(top8, digits = 1)
+
+```
+
+Those scoring groups have the following score breakdowns:
+
+```{r scoredetails , echo= FALSE}
+query <- paste(" select distinct  sd.[Hash] ,SD.totalscore as Score,   
+ -- SDG.GroupName,           SDG.GroupScore,            
+   F.FieldIdentifier,             F.MatchType
+   --,             F.Score as FieldScore    
+  from  MultiVueDataSync.",domain,".[ScoringDetails] SD      LEFT OUTER JOIN MultiVueDataSync.",domain,".[ScoringDetailsGroups] SDG    ON SDG.ScoringDetails_Id = SD.id     
+   LEFT OUTER JOIN MultiVueDataSync.",domain,".[ScoringDetailsGroupField] F   ON F.ScoringDetailsGroups_Id = SDG.id  order by sd.totalscore desc",sep="")
+
+scoredetails2 <- selectData(connectionString,query)
+
+query <- paste("   SELECT [Hash], count(*) as Count
+  FROM [MultiVueDataSync].",domain,".[ScoringDetails]
+  group by Hash
+  order by count(*)", sep="")
+hashcount <- selectData(connectionString,query)
+
+
+scoredetails <- scoredetails2 %>%
+spread( FieldIdentifier,MatchType) %>%
+inner_join(.,hashcount,by = "Hash") %>%
+arrange(Score) %>%
+select(-Hash)
+
+names(scoredetails)<-gsub(domain,'',names(scoredetails))
+
+kable(scoredetails)
+
+```
+
+
+##Validation Set
+
+
+``` {r validation , echo= FALSE}
+
+query <- "SELECT  
+      [MatchID]
+      ,[VirtualEntity1Id]
+      ,[VirtualEntity2Id]
+      ,[Domain]
+      ,[Score]
+      ,[Source1]
+      ,[Source2]
+      ,[EntityID1]
+      ,[EntityID2]
+      ,[ID1]
+      ,[ID2]
+      ,[Identifier1]
+      ,[Identifier2]
+      ,[PatientFirstNM1]
+      ,[PatientFirstNM2]
+      ,[PatientLastNM1]
+      ,[PatientLastNM2]
+      ,[SSN1]
+      ,[SSN2]
+  FROM [SAM].[MasterDataMonitoring].[PostMatchValidationSample]"
+#validationset  <- selectData(connectionString,query)
+#kable(validationset)
+query <- paste("SELECT TOP 10000 * FROM   [MultiVueDataSync].",domain,".[Match] AS M
+       INNER JOIN
+       [MultiVueDataSync].",domain,".[EntitySources] AS E1
+       ON m.VirtualEntity1Id = e1.VirtualId
+       INNER JOIN
+       [MultiVueDataSync].",domain,".[EntitySources] AS E2
+       ON m.VirtualEntity2Id = e2.VirtualId
+       LEFT OUTER JOIN
+       [MultiVueDataSync].",domain,".",rule," AS Patient1
+       ON M.VirtualEntity1Id = patient1.identifier
+       LEFT OUTER JOIN
+       [MultiVueDataSync].",domain,".",rule," AS Patient2
+       ON M.VirtualEntity2Id = patient2.identifier
+       where E1.EntityID like '[A-Z]%' OR E2.EntityId like '[A-Z]%'", sep="")
+
+sample <-  selectData(connectionString,query)
+```

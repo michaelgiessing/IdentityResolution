@@ -10,13 +10,12 @@ library(dplyr)
 library(knitr)
 knitr::opts_chunk$set(echo = TRUE)
 
-connectionString <- '
+connectionString <- "
   driver={SQL Server};
-  server=qu-edwdev;
+  server=AGCA-edwdev;
   database=SAM;
-  trustedConnection=true'
-query <- '
-
+  trustedConnection=true"
+query <- "
 SELECT TOP 10
       [AttributeNM]
       ,[RowSourceDSC]
@@ -25,10 +24,9 @@ SELECT TOP 10
       ,[DistinctValueCNT]
       ,[NullCNT]
       ,BlankCNT
-      ,100*1-(NullCNT + BlankCNT)/cast(RowCNT as float) AS FillPCT
-  
+      ,100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) AS FillPCT
   FROM [SAM].[SourcePatientProfiling].[SummaryPatientDescriptiveStatisticsBySource]
-  order by 100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) '
+  order by 100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) "
 FillRate <- selectData(connectionString,query)
 
 query <-"SELECT   
@@ -37,11 +35,30 @@ query <-"SELECT
   FROM [SAM].[SourcePatientProfiling].[SummaryPatientDescriptiveStatisticsBySource]
 group by rowsourceDSC"
 FillRateBySource <- selectData(connectionString,query)
+query <- " select  columnNM as AttributeNM
+  from EDWAdmin.CatalystAdmin.TableBASe T
+  inner join   EDWAdmin.CatalystAdmin.ColumnBASE C
+  on T.tableID = C.tableID
+  where databaseNM = 'shared'
+  and schemanm = 'Person'
+  and tableNM = 'SourceProviderBASE'
+  and ColumnNM not in ('BindingID','BindingNM', 'LastLoadDTS','ProviderID','RowSourceDSC')
+
+  Except
+
+  SELECT distinct
+      [AttributeNM]
+
+  
+  FROM [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource]"
+
+UnUsedList <- FillRateBySource <- selectData(connectionString,query,)
+
 
 ```
 
 ## Fill Rates
-For a field to be useful it must contain data.  The lowest 10 fill rates in Shared.Person.SourcePatient are in the table below. Additional information can be found in the EDW at SAM.SourcePatientProfiling.SummaryPatientDescriptiveStatisticsBySource
+For a field to be useful it must contain data. The fields **`r as.character(UnUsedList[,1])`** contain only NULLS and are not represented in this analysis. The lowest 10 fill rates in Shared.Person.SourcePatient are in the table below. Additional information can be found in the EDW at SAM.SourcePatientProfiling.SummaryPatientDescriptiveStatisticsBySource
 
 ```{r tableFillRate, echo= FALSE}
 kable(FillRate, digits =2)
@@ -71,7 +88,7 @@ order by RowSourceDSC, AttributeNM;"
 
 ```
 
-Text field can hold almost any type of data. In some cases, the text could be all numeric or it may contain dates. THe table below shows fields where the data could be cast as more than one type
+Text field can hold almost any type of data. In some cases, the text could be all numeric or it may contain dates. The table below shows fields where the data could be cast as more than one type. (Note: Blank fields can be cast as datatime and often appear in this table.)
 
 ```{r DataTYpe, echo= FALSE}
 datatype <- selectData(connectionString,query)

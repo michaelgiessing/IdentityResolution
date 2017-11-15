@@ -8,8 +8,10 @@ output: html_document
 library(healthcareai)
 library(dplyr)
 library(knitr)
+library(tidyr)
 knitr::opts_chunk$set(echo = TRUE)
 DisplayPHI <- TRUE
+
 
 # Set connection string for client
 connectionString <- "
@@ -25,11 +27,11 @@ WHERE tableID IN
 (
     SELECT [SourceEntityID]
     FROM [EDWAdmin].[CatalystAdmin].[BindingDependencyBASE]
-    WHERE bindingID =
+    WHERE bindingID in
     (
         SELECT [BindingID]
         FROM EDWAdmin.CatalystAdmin.BindingBASE
-        WHERE DestinationEntityID =
+        WHERE DestinationEntityID in
         (
             SELECT tableID
             FROM EDWAdmin.CatalystAdmin.TableBASE
@@ -44,12 +46,52 @@ DependencyList <- selectData(connectionString,query)
 ```
 
 ##Table Dependencies
-The dependencies for SourcePatient are **`r as.character(DependencyList[,1])`**
+The dependencies for SourcePatient are **`r as.character(DependencyList[,1])`**.
+
+## Column Utilization
+Matching between systems requires the same date on both systems. This table has the fill percentage each field. 
+
+```{r utilization, echo=FALSE}
+query <- "with att as (
+select ColumnNM as AttributeNM
+from EDWAdmin.CatalystAdmin.TableBASE T
+inner join EDWAdmin.CatalystAdmin.ColumnBASE C
+on t.tableID = c.tableID
+where viewNM = 'SourcePatient'
+and SchemaNM = 'Person'
+ and ColumnNM not in ('BindingID','BindingNM', 'LastLoadDTS', 'PatientID','RowSourceDSC')),
+src as (
+select distinct rowsourcedsc
+from shared.Person.SourcePatient)
+, 
+attsrc as(
+select * from att,src)
+
+SELECT
+      atts.[AttributeNM]
+      ,atts.[RowSourceDSC]
+	 --, case when rowCNT is NULL THEN 0 else 1 end as UsedFLG
+,coalesce(100-100*(NullCNT + BlankCNT)/cast(RowCNT as float),0) AS FillPCT
+
+  FROM attsrc atts left outer join 
+  [SAM].[SourcePatientProfiling].[SummaryPatientDescriptiveStatisticsBySource]  d
+  on atts.attributenm = d.attributeNM and atts.RowSourceDSC = d.RowSourceDSC"
+utilization <- selectData(connectionString,query)
+utilization <- spread(utilization,RowSourceDSC, FillPCT)
+
+ row.names(utilization)<-utilization$AttributeNM
+ utilization <- data.matrix(utilization[,-1])
+ 
+ #heatmap(utilization, Rowv=NA, Colv=NA, col= heat.colors(2), scale="column", margins=c(5,10))
+ 
+kable(utilization, digits = 1)
+
+```
 
 ## Fill Rates
 ```{r fillrates, echo= FALSE}
 query <- "
-SELECT TOP 10
+SELECT  top 20
       [AttributeNM]
       ,[RowSourceDSC]
       ,[RowCNT]
@@ -59,7 +101,10 @@ SELECT TOP 10
       ,BlankCNT
       ,100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) AS FillPCT
   FROM [SAM].[SourcePatientProfiling].[SummaryPatientDescriptiveStatisticsBySource]
-  order by 100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) "
+ 
+  order by 100-100*(NullCNT + BlankCNT)/cast(RowCNT as float)
+
+ "
 FillRate <- selectData(connectionString,query)
 
  query <- "select count(*)
@@ -74,31 +119,12 @@ query <-"SELECT
 group by rowsourceDSC"
 FillRateBySource <- selectData(connectionString,query)
 
-query <- " select  columnNM as AttributeNM
-  from EDWAdmin.CatalystAdmin.TableBASe T
-  inner join   EDWAdmin.CatalystAdmin.ColumnBASE C
-  on T.tableID = C.tableID
-  where databaseNM = 'shared'
-  and schemanm = 'Person'
-  and tableNM = 'SourcePatientBASE'
-  and ColumnNM not in ('BindingID','BindingNM', 'LastLoadDTS','ProviderID','RowSourceDSC')
 
-  Except
-
-  SELECT distinct
-      [AttributeNM]
-
-  
-  FROM [SAM].[SourcePatientProfiling].[SummaryPatientDescriptiveStatisticsBySource]"
-
-UnUsedList <- selectData(connectionString,query,)
 ```
-For a field to be useful it must contain data. The fields **`r as.character(UnUsedList[,1])`** contain only NULLS and are not represented in this analysis. The lowest 10 fill rates in Shared.Person.SourcePatient are in the table below. Additional information can be found in the EDW at SAM.SourcePatientProfiling.SummaryPatientDescriptiveStatisticsBySource
+Of the fields that do contain data, the lowest 20 fill rates in Shared.Person.SourcePatient are in the table below. Additional information can be found in the EDW at SAM.SourcePatientProfiling.SummaryPatientDescriptiveStatisticsBySource
 
 ```{r tableFillRate, echo= FALSE}
 FillRate <- FillRate %>% 
- mutate(RowCNT = count, NullCNT = count - ValueCNT) %>%
- mutate( FillPCT = 100-100*(NullCNT + BlankCNT)/RowCNT) %>%
 select(AttributeNM, RowSourceDSC, RowCNT, ValueCNT, DistinctValueCNT, NullCNT,BlankCNT, FillPCT)
 kable(FillRate, digits =1)
 ```
@@ -109,6 +135,7 @@ kable(FillRate, digits =1)
 query <-"SELECT  [AttributeNM],
                 [RowSourceDSC],
                 [RowCNT],
+                DataTypeDSC,
                 [NumericValueCNT],
                 [DateValueCNT],
                 [TextValueCNT]
@@ -132,30 +159,58 @@ Text field can hold almost any type of data. In some cases, the text could be al
 ```{r DataTYpe, echo= FALSE}
 datatype <- selectData(connectionString,query)
 datatype <- datatype %>%
-  mutate( NumericValuePCT = 100*NumericValueCNT/RowCNT, DateValuePCT = 100*DateValueCNT/RowCNT, TextValuePCT = 100*TextValueCNT/RowCNT) %>%
-  select(AttributeNM,RowSourceDSC,NumericValuePCT,  DateValuePCT, TextValuePCT)
+#  mutate( NumericValuePCT = 100*NumericValueCNT, DateValuePCT = 100*DateValueCNT/RowCNT, TextValuePCT = 100*TextValueCNT/RowCNT) %>%
+  select(AttributeNM,RowSourceDSC,DataTypeDSC,NumericValueCNT,  DateValueCNT, TextValueCNT)
   
 kable(datatype, digits = 2)
 ```
 
-
+## Field Range
 ```{r daterange, include=FALSE}
-query <- "
-  SELECT TOP 20
-      [rowsourceDSC]
-      ,[attributeNM]
-      ,[valueTXT]
-      ,[CNT]
-      ,[AllSourceCNT]
-  FROM [SAM].[SourcePatientProfiling].[SummaryPatientSuspiciousValues]
-  where attributeNM not in ('PatientStateCD', 'GenderCD', 'PatientCityNM', 'MaritalStatusDSC', 'LanguageDSC', 'EthnicGroupDSC', 'ContactsInLas3YearsNBR','RaceDSC')
-  order by CNT DESC
+query <- "/****** Script for SelectTopNRows command from SSMS  ******/
+         select     
+	    d.AttributeNM
+                  ,d.RowSourceDSC
+			   , t.DataTypeDSC
+			   ,MIN(d.ValueTXT ) AS RawMinVAL
+	       , MAX(d.ValueTXT) AS RawMaxVAL   
+			   ,min(TRY_CONVERT (NUMERIC, d.ValueTXT)) as NumericMinVal
+			   ,avg(TRY_CONVERT (NUMERIC, d.ValueTXT)) as NumericAvgVal
+			   ,max(TRY_CONVERT (NUMERIC, d.ValueTXT)) as NumericMaxVal
+FROM     SAM.[SourcePatientProfiling].[PatientAttributesPivotBASE]  as d
+inner join SAM.[SourcePatientProfiling].[SharedPersonProfilingEventPatientAttributeDataTypes] as t
+on d.attributeNM= t.attributeNM --and t.DataTypeDSC like 'num%'
+where valueTXT <> '' and valueTXT is not NULL
+GROUP BY d.AttributeNM, d.RowSourceDSC, t.datatypedsc
+order by  RowSourceDSC, AttributeNM
 "
 
+fvalue <-  selectData(connectionString,query)
+
+```
+The characturistics of the data in the fields can sometiems point to a suspicious item.  For example, fields that are abnormally long or have a value that is outside the range expected.  This table should some descriptive statistics of the values in each data field 
+
+``` {r tablechare , , echo= FALSE}
+kable(fvalue, digits = 1)
 ```
 
 
-## Suspicious Values
+##Field Character Length
+```{r fcharelength, echo= FALSE}
+query <- "/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT 
+           [AttributeNM]
+      ,[RowSourceDSC]
+    ,[MinLengthVAL]
+      ,[MeanVAL]
+      ,[MaxLengthVAL]
+  FROM [SAM].[SourcePatientProfiling].[SummaryPatientDescriptiveStatisticsBySource]"
+
+flength <-  selectData(connectionString,query)
+kable(flength, digits = 3)
+```
+
+## Most Frequent Values
 
 ```{r susp, include=FALSE}
 query <- "
@@ -172,7 +227,7 @@ query <- "
 
 ```
 
-Suspicious values occur frequently in the data.  They are often default values or some method of recording nulls that do not represent real information. Some attributes may be shared by a large number of people.  PatientStateCD, GenderCD, PatientCityNM, MaritalStatusDSC, LanguageDSC, EthnicGroupDSC, ContactsInLast3YearsNBR and RaceDSC are not included in the table below. The table below has the top 20 most frequent values in Shared.Person.SourcePatient.
+When a value occurs often in a data set, that may mean it is default values or some method of recording nulls.  These values might not represent real information. However there are attributes may be shared by a large number of people.  PatientStateCD, GenderCD, PatientCityNM, MaritalStatusDSC, LanguageDSC, EthnicGroupDSC, ContactsInLast3YearsNBR and RaceDSC are not included in the table below. The table below has the top 20 most frequent values in Shared.Person.SourcePatient.
 
 ```{r SUspTable, echo= FALSE}
 Susp20 <- selectData(connectionString,query)
@@ -204,10 +259,10 @@ kable(Address, digits = 3)
 
 
 ### Birth and Death Dates
-The most frequent dates are often the default dates. The table below has the top 10 most frequent dates.
+The most frequent dates are often the default dates. The table below has the top 20 most frequent dates.
 ```{r dates,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -223,10 +278,10 @@ kable(date, digits = 3)
 ```
 
 ### City
-The most frequent cities are usually part of the hosiptal geographic area, but there may be innappropriate values that come through too. The table below has the top 10 most frequent cities.
+The most frequent cities are usually part of the hosiptal geographic area, but there may be innappropriate values that come through too. The table below has the top 20 most frequent cities.
 ```{r city,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -247,7 +302,7 @@ kable(city, digits = 3)
 Gender can be coded many different ways, but should be normalized in Shared.Person.SourcePatient.   
 ```{r gender,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -268,7 +323,7 @@ kable(gender, digits = 3)
 First name may contain default values or variants of names for when a name is unknown.   
 ```{r firstname,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -288,7 +343,7 @@ kable(firstname, digits = 3)
 Last name may contain default values or variants of names for when a name is unknown.   
 ```{r lastname,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -308,7 +363,7 @@ kable(lastname, digits = 2 )
 Last name may contain default values or variants of names for when a name is unknown.   
 ```{r MRN,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -327,7 +382,7 @@ kable(MRN, digits = )
 Last name may contain default values or variants of names for when a name is unknown.   
 ```{r PCP,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -345,7 +400,7 @@ kable(PCP, digits = 3)
 Hight frequency phone number data may be a default value or it may belong to a facility, group home, etc.   
 ```{r PrimaryPhoneNBR,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -363,7 +418,7 @@ kable(PrimaryPhoneNBR, digits = 3)
 Hight frequency SSN data may be a default value, but could indicate another problem (Might be obscured to protect PHI) 
 ```{r SSN,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -385,24 +440,25 @@ query <- "SELECT   d.rowsourceDSC,
          COUNT(*) AS CNT,
         sum( COUNT(*)) OVER (PARTITION BY ValueTXT, attributeNM) AS AllSourceCNT
 FROM     SAM.[SourcePatientProfiling].[PatientAttributesPivotBASE] AS d
-where d.AttributeNM = 'SSN'
+where d.AttributeNM = 'SSN' and valuetxt <> ''
 GROUP BY d.RowSourceDSC, d.attributeNM, ValueTXT
 having count(*)>1
-order by CNT DESC"
+order by CNT DESC" }
 
  SSNhist <- selectData(connectionString,query)
 
-head(SSNhist)
+kable(head(SSNhist))
 
 hist(SSNhist[SSNhist$CNT<100,]$CNT, 100, xlab = "PatientCount",main = '')
-}
+
+
 ```
 
 ###State
 Hight frequency state data may be a default value, but could indicate another problem   
 ```{r PatientStateCD,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -420,7 +476,7 @@ kable(PatientStateCD, digits = 3)
 Hight frequency zip code data may be a default value, but could indicate another problem   
 ```{r PatientZipCD,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -443,7 +499,7 @@ kable(PatientZipCD)
 Hight frequency zip code data may be a default value, but could indicate another problem   
 ```{r RaceDSC,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -461,7 +517,7 @@ kable(RaceDSC)
 Hight frequency zip code data may be a default value, but could indicate another problem   
 ```{r ReligionDSC,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]
@@ -479,7 +535,7 @@ kable(ReligionDSC)
 Hight frequency subscriberID data may be a default value, but could indicate another problem   
 ```{r SubscriberID,  echo= FALSE }
 query <- "
- SELECT TOP 10
+ SELECT TOP 20
       [rowsourceDSC]
       ,[attributeNM]
       ,[valueTXT]

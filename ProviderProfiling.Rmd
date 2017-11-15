@@ -8,10 +8,13 @@ output: html_document
 library(healthcareai)
 library(dplyr)
 library(knitr)
+library(tidyr)
 knitr::opts_chunk$set(echo = TRUE)
+options(knitr.kable.NA = '')
 DisplayPHI <- TRUE
 
 
+# Set connection string for client
 connectionString <- "
   driver={SQL Server};
   server=AGCA-edwdev;
@@ -26,11 +29,11 @@ WHERE tableID IN
 (
     SELECT [SourceEntityID]
     FROM [EDWAdmin].[CatalystAdmin].[BindingDependencyBASE]
-    WHERE bindingID =
+    WHERE bindingID in
     (
         SELECT [BindingID]
         FROM EDWAdmin.CatalystAdmin.BindingBASE
-        WHERE DestinationEntityID =
+        WHERE DestinationEntityID in
         (
             SELECT tableID
             FROM EDWAdmin.CatalystAdmin.TableBASE
@@ -48,13 +51,54 @@ DependencyList <- selectData(connectionString,query)
 The dependencies for SourceProvider are **`r as.character(DependencyList[,1])`**
 
 
+## Column Utilization
+Matching between systems requires the same date on both systems. This table has the fill percentage each field. 
 
+```{r utilization, echo=FALSE}
+query <- "with att as (
+select ColumnNM as AttributeNM
+from EDWAdmin.CatalystAdmin.TableBASE T
+inner join EDWAdmin.CatalystAdmin.ColumnBASE C
+on t.tableID = c.tableID
+where viewNM = 'SourceProvider'
+and SchemaNM = 'Person'
+ and ColumnNM not in ('BindingID','BindingNM', 'LastLoadDTS', 'ProviderID','RowSourceDSC')),
+src as (
+select distinct rowsourcedsc
+from shared.Person.SourceProvider)
+, 
+attsrc as(
+select * from att,src)
+
+SELECT
+      atts.[AttributeNM]
+      ,atts.[RowSourceDSC]
+	 --, case when rowCNT is NULL THEN 0 else 1 end as UsedFLG
+,coalesce(100-100*(NullCNT + BlankCNT)/cast(RowCNT as float),0) AS FillPCT
+
+  FROM attsrc atts left outer join 
+  [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource]  d
+  on atts.attributenm = d.attributeNM and atts.RowSourceDSC = d.RowSourceDSC
+
+  ;"
+utilization <- selectData(connectionString,query)
+utilization <- spread(utilization,RowSourceDSC, FillPCT)
+
+ #row.names(utilization)<-utilization$AttributeNM
+ #utilization <- data.matrix(utilization[,-1])
+ #utilization <- utilization[,-1]
+ 
+ #heatmap(utilization, Rowv=NA, Colv=NA, col= heat.colors(2), scale="column", margins=c(5,10))
+ 
+kable(utilization, digits = 1)
+
+```
 
 
 
 ```{r, fillrate , echo= FALSE}
 query <- "
-SELECT TOP 10
+SELECT TOP 200
       [AttributeNM]
       ,[RowSourceDSC]
       ,[RowCNT]
@@ -62,6 +106,7 @@ SELECT TOP 10
       ,[DistinctValueCNT]
       ,[NullCNT]
       ,BlankCNT
+,100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) AS FillPCT
   FROM [SAM].[SourceProviderProfiling].[SummaryProviderDescriptiveStatisticsBySource]
   order by 100-100*(NullCNT + BlankCNT)/cast(RowCNT as float) "
 FillRate <- selectData(connectionString,query)
@@ -104,8 +149,7 @@ For a field to be useful it must contain data. The fields **`r as.character(UnUs
 
 ```{r tableFillRate, echo= FALSE}
 FillRate <- FillRate %>% 
- mutate(RowCNT = count, NullCNT = count - ValueCNT) %>%
- mutate( FillPCT = 100-100*(NullCNT + BlankCNT)/RowCNT) %>%
+
 select(AttributeNM, RowSourceDSC, RowCNT, ValueCNT, DistinctValueCNT, NullCNT,BlankCNT, FillPCT)
 kable(FillRate, digits =1)
 ```
@@ -184,7 +228,7 @@ Suspicious values occur frequently in the data.  They are often default values o
 
 ```{r SUspTable, echo= FALSE}
 Susp20 <- selectData(connectionString,query)
-kable(Susp20, digits = 3)
+kable(Susp20, digits = 3, na.encode = TRUE)
 ```
 
 
@@ -207,7 +251,7 @@ query <- "
   order by CNT DESC
 "
 date <- selectData(connectionString,query)
-kable(date, digits = 3)
+kable(date, digits = 3, na.encode = "")
 
 ```
 

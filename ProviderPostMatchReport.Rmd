@@ -10,6 +10,10 @@ library(dplyr)
 library(knitr)
 library(tidyr)
 knitr::opts_chunk$set(echo = TRUE)
+options(knitr.kable.NA = '')
+
+domain <- "Patient"
+rule <- "Patient"
 
 connectionString <- '
   driver={SQL Server};
@@ -18,35 +22,45 @@ connectionString <- '
   trustedConnection=true'
 
 ```
-##verification
-```{r verification, include=FALSE}
- query <- "
-SELECT source1 as Source, source2,count(*)as  MatchCNT
-  FROM [SAM].[MasterDataMonitoring].[PostMatchDetail]
-  group by source1, source2"
+##Verification
+```{r verification, echo=FALSE}
+query <- paste(
+ "select count(*)
+  from MultiVueDataSync.",domain,".",rule, sep = "")
 
-matchmatrix<- selectData(connectionString,query)
+totalmatches <-  selectData(connectionString,query)
+totalmatches <- totalmatches[1,1]
+
 ```
 
+The number of total matches is  `r  totalmatches`
 
 ##Match Combinations
 
-```{r interactions , echo=FALSE}
- query <- "
-SELECT source1 as Source, source2,count(*)as  MatchCNT
-  FROM [SAM].[MasterDataMonitoring].[PostMatchDetail]
-  group by source1, source2"
+```{r matchcombo, echo=FALSE}
+ query <- paste("SELECT e1.source as Source1, e2.source as Source2,count(*)as  MatchCNT
+FROM   [MultiVueDataSync].",domain,".[Match] AS M
+       INNER JOIN
+       [MultiVueDataSync].",domain,".[EntitySources] AS E1
+       ON m.VirtualEntity1Id = e1.VirtualId
+       INNER JOIN
+       [MultiVueDataSync].",domain,".[EntitySources] AS E2
+       ON m.VirtualEntity2Id = e2.VirtualId
+       LEFT OUTER JOIN
+       [MultiVueDataSync].",domain,".",rule," AS Patient1
+       ON M.VirtualEntity1Id = patient1.identifier
+       LEFT OUTER JOIN
+       [MultiVueDataSync].",domain,".",rule," AS Patient2
+       ON M.VirtualEntity2Id = patient2.identifier
+        group by e1.source, e2.source", sep = "")
 
 matchmatrix<- selectData(connectionString,query)
-matchmatrix <- spread(matchmatrix,source2, MatchCNT)
+matchmatrix <- spread(matchmatrix,Source2, MatchCNT)
 kable(matchmatrix)
 
 
 
-query <- "
-  --total matches
-  SELECT count(*)
-  FROM [SAM].[MasterDataMonitoring].[PostMatchDetail]"
+
 
 ```
 
@@ -56,11 +70,12 @@ query <- "
 
 ```{r scoredist , include=FALSE}
 
-query <- '/****** Script for SelectTopNRows command from SSMS  ******/
-SELECT 
+query <- paste("
+  SELECT 
       [Score]
-      ,[ScoreCNT]
-  FROM [SAM].[MasterDataMonitoring].[PostMatchScoreFrequency]'
+	 , count(score) as ScoreCNT 
+  FROM [MultiVueDataSync].",domain,".[Match] M
+  group by score", sep = "")
 ScoreFreq <- selectData(connectionString,query)
 
 
@@ -90,6 +105,7 @@ tot <- sum(ScoreFreq$ScoreCNT)
 top8 <- ScoreFreq %>%
   arrange(desc(ScoreCNT)) %>%
   head(n=8) %>%
+  mutate(ScorePCT = 100*ScoreCNT/totalmatches ) %>%
   arrange(desc(ScoreCNT))
 ```
 From this distribution the prominent peaks are if the most interest in finding the merge threshold. Preform a validation test on these peaks to find which neighborhood the merge threshold should be in.The peaks account for `r sprintf("%3.1f",100*sum(top8$ScoreCNT)/tot)`% of the possible matches.
@@ -103,34 +119,27 @@ kable(top8)
 Those scoring groups have the following score breakdowns:
 
 ```{r scoredetails , echo= FALSE}
-query <- "SELECT  distinct
-      m.[Score]
-      --,[ScoreDetailsID]
-      --,[MatchRuleName]
-     -- ,[Hash]
-     -- ,[ScoreDetailGroupID]
-      ,[GroupName]
-      ,[GroupScore]
-     -- ,[ThresholdApplied]
-      --,[ScoreBeforeLimitApplied]
-      --,[ScoreDetailGroupFieldID]
-      ,[FieldIdentifier]
-      ,[MatchType]
-      ,[FieldScore]
-    --  ,[ScoreReduction]
-  FROM [SAM].[MasterDataMonitoring].[PostMatchScoreDetail] m
-  where m.Score in (SELECT top 5
-      [Score]
-  FROM [SAM].[MasterDataMonitoring].[PostMatchScoreFrequency] 
-  order by ScoreCNT desc)"
+query <- paste("select distinct
+		  SD.totalscore,
+		  F.Score,
+		  SDG.GroupName,
+            SDG.GroupScore,
+            F.FieldIdentifier,
+            F.MatchType,
+            F.Score as FieldScore
+    from
+	MultiVueDataSync.",domain,".[ScoringDetails] SD
+     LEFT OUTER JOIN MultiVueDataSync.",domain,".[ScoringDetailsGroups] SDG
+	  ON SDG.ScoringDetails_Id = SD.id
+     LEFT OUTER JOIN MultiVueDataSync.",domain,".[ScoringDetailsGroupField] F 
+	ON F.ScoringDetailsGroups_Id = SDG.id;", sep = "")
 scoredetails <- selectData(connectionString,query)
 kable(scoredetails)
 ```
 
 
 
-##Validation of Score Groups
-Each score group will be evaliatied using the rule of 3.  To determine if it is a positive (all pairs identify the same person) or a negative (all pairs do not identify the same person) set.  The merge threshold must be set at or above a positive set.
+
 
 ``` {r validation , echo= FALSE}
 
@@ -155,8 +164,8 @@ query <- "SELECT
       ,[SSN1]
       ,[SSN2]
   FROM [SAM].[MasterDataMonitoring].[PostMatchValidationSample]"
-validationset  <- selectData(connectionString,query)
-kable(validationset)
+#validationset  <- selectData(connectionString,query)
+#kable(validationset)
 
 
 ```
